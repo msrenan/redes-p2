@@ -113,6 +113,15 @@ class Conexao:
 
         if (packet.seqn == self.ack):
             self.ack += len(packet.payload)
+
+            if (packet.flags & FLAGS_FIN) == FLAGS_FIN:
+                self.ack += 1
+                print(f"Encerrando Conexao[{self.id_conexao}]!")
+                fin_ack_header = make_header(self.servidor.porta, self.id_conexao[1], self.seq, self.ack, FLAGS_ACK)
+                complete_header = fix_checksum(fin_ack_header, self.id_conexao[0], self.id_conexao[2])
+                self.servidor.rede.enviar(complete_header, self.id_conexao[0])
+                return
+
             if self.callback:
                 self.callback(self, packet.payload)
         
