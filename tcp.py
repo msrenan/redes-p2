@@ -58,18 +58,17 @@ class Servidor:
         if (packet.flags & FLAGS_SYN) == FLAGS_SYN:
             # A flag SYN estar setada significa que é um cliente tentando estabelecer uma conexão nova
             # TODO: talvez você precise passar mais coisas para o construtor de conexão
-            conexao = self.pending_connections[id_conexao] = Conexao(self, id_conexao, False, src_addr)
+            conexao = self.pending_connections[id_conexao] = Conexao(self, id_conexao, False, packet.seqn)
             # TODO: você precisa fazer o handshake aceitando a conexão. Escolha se você acha melhor
             # fazer aqui mesmo ou dentro da classe Conexao.
-            print((FLAGS_SYN + FLAGS_ACK).to_bytes())
-            syn_ack_header = make_header(packet.dst_port, packet.src_port, random.randint(10000000, 999999999), packet.seqn + 1, (FLAGS_SYN | FLAGS_ACK))
+            syn_ack_header = make_header(packet.dst_port, packet.src_port, conexao.seq, conexao.ack, (FLAGS_SYN | FLAGS_ACK))
 
             print(f"Pacote SYN recebido: {packet}")
 
             complete_header = fix_checksum(syn_ack_header, dst_addr, src_addr)
 
             self.rede.enviar(complete_header, src_addr)
-
+            conexao.seq += 1
             print(f"Pacote ACK enviado: {syn_ack_header} -> {src_addr}")
             conexao.reset_timer(20)
         elif id_conexao in self.pending_connections and (packet.flags & FLAGS_ACK) == FLAGS_ACK:
@@ -89,14 +88,18 @@ class Servidor:
 
 
 class Conexao:
-    def __init__(self, servidor, id_conexao, established, addr):
+    def __init__(self, servidor, id_conexao, established, src_seq):
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
         self.established = established
         self.timer = asyncio.get_event_loop().call_later(10, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
-        self.addr = addr
+        self.seq = random.randint(1000000, 9999999)
+        self.ack = src_seq + 1
+        self.queue = {}
+
+        print(f"    INIT: [SEQ={self.seq} & ACK={self.ack}]")
 
     def _exemplo_timer(self):
         # Esta função é só um exemplo e pode ser removida
@@ -107,8 +110,14 @@ class Conexao:
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-        print('recebido payload: %r' % self.payload)
-        self.callback(self, packet.payload)
+
+        if (packet.seqn == self.ack):
+            self.ack += len(packet.payload)
+            if self.callback:
+                self.callback(self, packet.payload)
+        
+        # SEQ atualiza sempre que responder
+        # ACK atualiza sempre que receber
 
     # Os métodos abaixo fazem parte da API
 
@@ -126,13 +135,24 @@ class Conexao:
         self.timer.cancel()
         # TODO: implemente aqui o envio de dados.
         # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
-        self.servidor.rede.enviar(dados, self.addr)
+        
+        
+
+        ack_header = make_header(self.servidor.porta, self.id_conexao[1], self.seq, self.ack, FLAGS_ACK)
+
+        self.seq += len(dados)
+
+        complete_header = fix_checksum(ack_header+dados, self.id_conexao[0], self.id_conexao[2])
+
+        print(f"Enviando dados: {dados}")
+
+        self.servidor.rede.enviar(complete_header, self.id_conexao[0])
+        
 
     def fechar(self):
         """
         Usado pela camada de aplicação para fechar a conexão
         """
-        # TODO: implemente aqui o fechamento de conexão
         pass
 
     def reset_timer(self, delay):
