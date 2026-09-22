@@ -13,6 +13,7 @@ from ip import IP
 from tcp import Servidor
 
 def dados_recebidos(conexao, dados):
+    print(f"dados={dados}")
     if dados == b'':
         conexao.fechar()
     else:
