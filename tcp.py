@@ -1,12 +1,27 @@
 import asyncio
 from tcputils import *
 
+class TcpPacket:
+    def __init__(self, src_port, dst_port, seq_no, ack_no, flags, window_size, checksum, urg_ptr,
+                 payload):
+        self.src_port = src_port
+        self.dst_port = dst_port
+        self.seqn = seq_no
+        self.ackn = ack_no
+        self.flags = flags
+        self.win_size = window_size
+        self.checksum = checksum
+        self.urg_ptr = urg_ptr
+        self.payload = payload
+
+    
 
 class Servidor:
     def __init__(self, rede, porta):
         self.rede = rede
         self.porta = porta
-        self.conexoes = {}
+        self.established_connections = {}
+        self.pending_connections = {}
         self.callback = None
         self.rede.registrar_recebedor(self._rdt_rcv)
 
@@ -16,6 +31,8 @@ class Servidor:
         sempre que uma nova conexão for aceita
         """
         self.callback = callback
+
+    # Armazenar conexão só após o ACK final
 
     def _rdt_rcv(self, src_addr, dst_addr, segment):
         src_port, dst_port, seq_no, ack_no, \
@@ -34,14 +51,14 @@ class Servidor:
         if (flags & FLAGS_SYN) == FLAGS_SYN:
             # A flag SYN estar setada significa que é um cliente tentando estabelecer uma conexão nova
             # TODO: talvez você precise passar mais coisas para o construtor de conexão
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao)
+            conexao = self.established_connections[id_conexao] = Conexao(self, id_conexao)
             # TODO: você precisa fazer o handshake aceitando a conexão. Escolha se você acha melhor
             # fazer aqui mesmo ou dentro da classe Conexao.
             if self.callback:
                 self.callback(conexao)
-        elif id_conexao in self.conexoes:
+        elif id_conexao in self.established_connections:
             # Passa para a conexão adequada se ela já estiver estabelecida
-            self.conexoes[id_conexao]._rdt_rcv(seq_no, ack_no, flags, payload)
+            self.established_connections[id_conexao]._rdt_rcv(seq_no, ack_no, flags, payload)
         else:
             print('%s:%d -> %s:%d (pacote associado a conexão desconhecida)' %
                   (src_addr, src_port, dst_addr, dst_port))
