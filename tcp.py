@@ -1,6 +1,9 @@
 import asyncio
 from tcputils import *
 import random
+import time
+
+INTERVALO = 1
 
 class TcpPacket:
     def __init__(self, src_port, dst_port, seq_no, ack_no, flags, window_size, checksum, urg_ptr,
@@ -17,7 +20,7 @@ class TcpPacket:
 
     def __str__(self):
         return f"[[ src_port={self.src_port}, dst_port={self.dst_port} seqn={self.seqn} ackn={self.ackn} flags={self.flags} ]]"
-    
+
 
 class Servidor:
     def __init__(self, rede, porta):
@@ -44,7 +47,7 @@ class Servidor:
         if dst_port != self.porta:
             # Ignora segmentos que não são destinados à porta do nosso servidor
             return
-        
+
         if not self.rede.ignore_checksum and calc_checksum(segment, src_addr, dst_addr) != 0:
             print('descartando segmento com checksum incorreto')
             return
@@ -69,13 +72,16 @@ class Servidor:
 
             self.rede.enviar(complete_header, src_addr)
             conexao.seq += 1
+            conexao.send_base = conexao.seq
+
             print(f"Pacote ACK enviado: {syn_ack_header} -> {src_addr}")
-            conexao.reset_timer(20)
+
         elif id_conexao in self.pending_connections and (packet.flags & FLAGS_ACK) == FLAGS_ACK:
             # Estabalecer conexão
             print(f"Estabelecendo conexão: {id_conexao}")
             conexao = self.pending_connections.pop(id_conexao)
             self.established_connections[id_conexao] = conexao
+            conexao._rdt_rcv(packet)
 
             if self.callback:
                 self.callback(conexao)
@@ -93,11 +99,13 @@ class Conexao:
         self.id_conexao = id_conexao
         self.callback = None
         self.established = established
-        self.timer = asyncio.get_event_loop().call_later(10, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
-        #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
+        self.timer = None
+        # self.timer = asyncio.get_event_loop().call_later(10, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
+        # self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
         self.seq = random.randint(1000000, 9999999)
         self.ack = src_seq + 1
-        self.queue = {}
+        self.nack_queue = {}
+        self.send_base = 0
 
         print(f"    INIT: [SEQ={self.seq} & ACK={self.ack}]")
 
@@ -111,6 +119,16 @@ class Conexao:
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
 
+        if (packet.flags & FLAGS_ACK) and packet.ackn > self.send_base:
+            self.send_base = packet.ackn
+            for seq in list(self.nack_queue):
+                if seq + self.nack_queue[seq]['len'] <= packet.ackn:
+                    del self.nack_queue[seq]
+
+            self.timer = None
+            if self.nack_queue:                 # ainda falta confirmar, reinicia o timer
+                self.timer = asyncio.get_event_loop().call_later(INTERVALO, self._timeout)
+
         if (packet.seqn == self.ack):
             self.ack += len(packet.payload)
 
@@ -120,11 +138,12 @@ class Conexao:
                 fin_ack_header = make_header(self.servidor.porta, self.id_conexao[1], self.seq, self.ack, FLAGS_ACK)
                 complete_header = fix_checksum(fin_ack_header, self.id_conexao[0], self.id_conexao[2])
                 self.servidor.rede.enviar(complete_header, self.id_conexao[0])
+                self.callback(self, b'')
                 return
 
             if self.callback:
                 self.callback(self, packet.payload)
-        
+
         # SEQ atualiza sempre que responder
         # ACK atualiza sempre que receber
 
@@ -141,22 +160,24 @@ class Conexao:
         """
         Usado pela camada de aplicação para enviar dados
         """
-        self.timer.cancel()
         # TODO: implemente aqui o envio de dados.
         # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
-        
-        
 
         ack_header = make_header(self.servidor.porta, self.id_conexao[1], self.seq, self.ack, FLAGS_ACK)
 
-        self.seq += len(dados)
-
-        complete_header = fix_checksum(ack_header+dados, self.id_conexao[0], self.id_conexao[2])
+        complete_header = fix_checksum(ack_header+dados, self.id_conexao[2], self.id_conexao[0])
 
         print(f"Enviando dados: {dados}")
 
+        self.nack_queue[self.seq] = {'segmento': complete_header, 'len': len(dados), 't_envio': time.time(),'retransmitido': False}
+
         self.servidor.rede.enviar(complete_header, self.id_conexao[0])
-        
+
+        self.seq += len(dados)
+
+        if self.timer is None:   # o timer só roda enquanto houver algo não confirmado
+                self.timer = asyncio.get_event_loop().call_later(INTERVALO, self._timeout)
+
 
     def fechar(self):
         """
@@ -165,5 +186,14 @@ class Conexao:
         pass
 
     def reset_timer(self, delay):
-        self.timer.cancel()
-        self.timer = asyncio.get_event_loop().call_later(delay, self._exemplo_timer)
+        self.timer = asyncio.get_event_loop().call_later(delay, self._timeout)
+
+    def _timeout(self):
+        self.timer = None
+        if not self.nack_queue:
+            return
+        seq = min(self.nack_queue)          # o mais antigo, deve ser igual ao send_base
+        entrada = self.nack_queue[seq]
+        entrada['retransmitido'] = True
+        self.servidor.rede.enviar(entrada['segmento'], self.id_conexao[0])
+        self.timer = asyncio.get_event_loop().call_later(INTERVALO, self._timeout)
