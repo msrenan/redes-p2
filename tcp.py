@@ -66,7 +66,7 @@ class Servidor:
             # fazer aqui mesmo ou dentro da classe Conexao.
             syn_ack_header = make_header(packet.dst_port, packet.src_port, conexao.seq, conexao.ack, (FLAGS_SYN | FLAGS_ACK))
 
-            print(f"Pacote SYN recebido: {packet}")
+            print(f"Pacote SYN recebido: {packet.seqn}")
 
             complete_header = fix_checksum(syn_ack_header, dst_addr, src_addr)
 
@@ -89,7 +89,7 @@ class Servidor:
             # Passa para a conexão adequada se ela já estiver estabelecida
             self.established_connections[id_conexao]._rdt_rcv(packet)
         else:
-            print(f"Pacote associado a uma conexão desconhecida: {str(packet)}")
+            print(f"Pacote associado a uma conexão desconhecida: {id_conexao}, {packet.src_port}, {packet.dst_port};\n seqn={packet.seqn}, ackn={packet.ackn}, flags={packet.flags}")
             print(f"Conexões pendentes: {self.pending_connections}")
 
 
@@ -102,6 +102,7 @@ class Conexao:
         self.timer = None
         # self.timer = asyncio.get_event_loop().call_later(10, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         # self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
+        self.fin_rcvd = False
         self.seq = random.randint(1000000, 9999999)
         self.ack = src_seq + 1
         self.nack_queue = {}
@@ -125,24 +126,39 @@ class Conexao:
                 if seq + self.nack_queue[seq]['len'] <= packet.ackn:
                     del self.nack_queue[seq]
 
-            self.timer = None
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
             if self.nack_queue:                 # ainda falta confirmar, reinicia o timer
                 self.timer = asyncio.get_event_loop().call_later(INTERVALO, self._timeout)
+
+        # Ignorar dados depois de FIN
+        if self.fin_rcvd:
+            return
+
+        # Não responder ACK puro (sem payload e sem FIN)
+        if len(packet.payload) == 0 and (packet.flags & FLAGS_FIN) != FLAGS_FIN:
+            return
 
         if (packet.seqn == self.ack):
             self.ack += len(packet.payload)
 
             if (packet.flags & FLAGS_FIN) == FLAGS_FIN:
                 self.ack += 1
+                self.fin_rcvd = True
                 print(f"Encerrando Conexao[{self.id_conexao}]!")
+
                 fin_ack_header = make_header(self.servidor.porta, self.id_conexao[1], self.seq, self.ack, FLAGS_ACK)
-                complete_header = fix_checksum(fin_ack_header, self.id_conexao[0], self.id_conexao[2])
+                complete_header = fix_checksum(fin_ack_header+b'', self.id_conexao[2], self.id_conexao[0])
+
                 self.servidor.rede.enviar(complete_header, self.id_conexao[0])
-                self.callback(self, b'')
-                return
 
             if self.callback:
-                self.callback(self, packet.payload)
+                if packet.payload:
+                    self.callback(self, packet.payload)
+                if (packet.flags & FLAGS_FIN) == FLAGS_FIN:
+                    self.callback(self)
 
         # SEQ atualiza sempre que responder
         # ACK atualiza sempre que receber
@@ -167,7 +183,7 @@ class Conexao:
 
         complete_header = fix_checksum(ack_header+dados, self.id_conexao[2], self.id_conexao[0])
 
-        print(f"Enviando dados: {dados}")
+        # print(f"Enviando dados: {dados}")
 
         self.nack_queue[self.seq] = {'segmento': complete_header, 'len': len(dados), 't_envio': time.time(),'retransmitido': False}
 
