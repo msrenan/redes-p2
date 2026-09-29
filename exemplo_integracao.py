@@ -13,13 +13,14 @@ from ip import IP
 from tcp import Servidor
 
 def dados_recebidos(conexao, dados):
-    print(f"dados={dados}")
+    print(f"{len(dados)} bytes recebidos!")
     if dados == b'':
         conexao.fechar()
     else:
         conexao.enviar(dados)   # envia de volta
 
 def conexao_aceita(conexao):
+    print(f"Foi aceita.")
     conexao.registrar_recebedor(dados_recebidos)   # usa esse mesmo recebedor para toda conexão aceita
 
 async def main():
