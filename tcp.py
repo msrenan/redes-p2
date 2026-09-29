@@ -1,6 +1,7 @@
 import asyncio
 from tcputils import *
 import random
+import time
 
 TIMEOUT = 0.2  # segundos
 
@@ -99,6 +100,9 @@ class Conexao:
         self.cwnd = MSS  # congestion window começa com 1 MSS
         self.acks_recebidos = 0  # quantos ACKs já recebemos na janela atual
         self.timer = None
+        self.ertt = None
+        self.drtt = None
+        self.timeout_interval = TIMEOUT
 
     def _cancel_timer(self):
         if self.timer is not None:
@@ -113,7 +117,8 @@ class Conexao:
         self.acks_recebidos = 0
         self.timer = None
         if self.unacked:
-            seq, dados = self.unacked[0]
+            self.unacked[0][3] = True
+            seq, dados = self.unacked[0][0], self.unacked[0][1]
             header = make_header(self.servidor.porta, self.id_conexao[1], seq, self.ack, FLAGS_ACK)
             self.servidor.rede.enviar(fix_checksum(header + dados, self.id_conexao[2], self.id_conexao[0]), self.id_conexao[0])
         self._reset_timer()
@@ -123,7 +128,7 @@ class Conexao:
         if not self.unacked:
             return
         try:
-            loop = asyncio.get_event_loop().call_later(TIMEOUT, self._timeout)
+            loop = asyncio.get_event_loop().call_later(self.timeout_interval, self._timeout)
         except RuntimeError:
             return
 
@@ -134,9 +139,20 @@ class Conexao:
         if (packet.flags & FLAGS_ACK) == FLAGS_ACK:
             confirmados = 0
             restantes = []
+            amostrou = False
             for s in self.unacked:
                 if s[0] + len(s[1]) <= packet.ackn:
                     confirmados += 1
+                    if not amostrou and not s[3]:
+                        amostrou = True
+                        amostra = time.time() - s[2]
+                        if self.ertt is None:
+                            self.ertt = amostra
+                            self.drtt = amostra / 2
+                        else:
+                            self.drtt = 0.75 * self.drtt + 0.25 * abs(amostra - self.ertt)
+                            self.ertt = 0.875 * self.ertt + 0.125 * amostra
+                        self.timeout_interval = self.ertt + 4 * self.drtt
                 else:
                     restantes.append(s)
 
@@ -152,7 +168,7 @@ class Conexao:
                 seq, dados = self.pending.pop(0)
                 header = make_header(self.servidor.porta, self.id_conexao[1], seq, self.ack, FLAGS_ACK)
                 self.servidor.rede.enviar(fix_checksum(header + dados, self.id_conexao[2], self.id_conexao[0]), self.id_conexao[0])
-                self.unacked.append([seq, dados])
+                self.unacked.append([seq, dados, time.time(), False])
 
             self._reset_timer()
 
@@ -214,7 +230,7 @@ class Conexao:
             seq, dados = self.pending.pop(0)
             header = make_header(self.servidor.porta, self.id_conexao[1], seq, self.ack, FLAGS_ACK)
             self.servidor.rede.enviar(fix_checksum(header + dados, self.id_conexao[2], self.id_conexao[0]), self.id_conexao[0])
-            self.unacked.append([seq, dados])
+            self.unacked.append([seq, dados, time.time(), False])
 
         self._reset_timer()
 
