@@ -2,7 +2,7 @@ import asyncio
 from tcputils import *
 import random
 
-TIMEOUT = 1
+TIMEOUT = 0.2  # segundos
 
 class TcpPacket:
     def __init__(self, src_port, dst_port, seq_no, ack_no, flags, window_size, checksum, urg_ptr,
@@ -37,8 +37,6 @@ class Servidor:
         """
         self.callback = callback
 
-    # Armazenar conexão só após o ACK final
-
     def _rdt_rcv(self, src_addr, dst_addr, segment):
         src_port, dst_port, seq_no, ack_no, \
             flags, window_size, checksum, urg_ptr = read_header(segment)
@@ -72,7 +70,7 @@ class Servidor:
             if self.callback:
                 self.callback(conexao)
         elif id_conexao in self.pending_connections and (packet.flags & FLAGS_ACK) == FLAGS_ACK:
-            # Estabalecer conexão
+            # estabelecer conexão
             print(f"Estabelecendo conexão: {id_conexao}")
             conexao = self.pending_connections.pop(id_conexao)
             self.established_connections[id_conexao] = conexao
@@ -98,6 +96,8 @@ class Conexao:
         self.fin_wait = False
         self.unacked = []
         self.pending = []
+        self.cwnd = MSS  # congestion window começa com 1 MSS
+        self.acks_recebidos = 0  # quantos ACKs já recebemos na janela atual
         self.timer = None
 
     def _cancel_timer(self):
@@ -106,6 +106,11 @@ class Conexao:
             self.timer = None
 
     def _timeout(self):
+        # quando der timeout, reduzimos a janela pela metade (Multiplicative Decrease)
+        print(f"  [TIMEOUT] Deu timeout! Reduzindo janela de {self.cwnd // MSS} MSS...")
+        # mantém a janela como múltiplo inteiro de MSS
+        self.cwnd = max(MSS, (self.cwnd // (2 * MSS)) * MSS)
+        self.acks_recebidos = 0
         self.timer = None
         if self.unacked:
             seq, dados = self.unacked[0]
@@ -117,27 +122,39 @@ class Conexao:
         self._cancel_timer()
         if not self.unacked:
             return
-        
-        self.timer = asyncio.get_event_loop().call_later(TIMEOUT, self._timeout)
+        try:
+            loop = asyncio.get_event_loop().call_later(TIMEOUT, self._timeout)
+        except RuntimeError:
+            return
+
+        self.timer = loop
 
     def _rdt_rcv(self, packet: TcpPacket):
-        # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
-        # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
-        # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-
+        # primeiro trata ACK dos nossos dados enviados
         if (packet.flags & FLAGS_ACK) == FLAGS_ACK:
-            tmp = []
+            confirmados = 0
+            restantes = []
             for s in self.unacked:
-                if s[0] + len(s[1]) > packet.ackn:
-                    tmp.append(s)
+                if s[0] + len(s[1]) <= packet.ackn:
+                    confirmados += 1
+                else:
+                    restantes.append(s)
 
-            self.unacked = tmp
-            while self.pending and len(self.unacked) < 1:
+            if confirmados > 0:
+                self.unacked = restantes
+                self.acks_recebidos += confirmados
+                if self.acks_recebidos >= self.cwnd // MSS:
+                    self.cwnd += MSS
+                    self.acks_recebidos = 0
+                    print(f"  [AIMD] Janela aumentada para {self.cwnd // MSS} MSS")
+
+            while self.pending and len(self.unacked) < self.cwnd // MSS:
                 seq, dados = self.pending.pop(0)
                 header = make_header(self.servidor.porta, self.id_conexao[1], seq, self.ack, FLAGS_ACK)
                 self.servidor.rede.enviar(fix_checksum(header + dados, self.id_conexao[2], self.id_conexao[0]), self.id_conexao[0])
                 self.unacked.append([seq, dados])
 
+            self._reset_timer()
 
         if (packet.seqn == self.ack):
 
@@ -169,9 +186,6 @@ class Conexao:
             
             if self.callback:
                 self.callback(self, packet.payload)
-        
-        # SEQ atualiza sempre que responder
-        # ACK atualiza sempre que receber
 
     # Os métodos abaixo fazem parte da API
 
@@ -196,12 +210,13 @@ class Conexao:
             self.pending.append([self.seq, block])
             self.seq += len(block)
 
-        while self.pending and len(self.unacked) < 1:
+        while self.pending and len(self.unacked) < self.cwnd // MSS:
             seq, dados = self.pending.pop(0)
             header = make_header(self.servidor.porta, self.id_conexao[1], seq, self.ack, FLAGS_ACK)
             self.servidor.rede.enviar(fix_checksum(header + dados, self.id_conexao[2], self.id_conexao[0]), self.id_conexao[0])
             self.unacked.append([seq, dados])
-        
+
+        self._reset_timer()
 
     def fechar(self):
         """
